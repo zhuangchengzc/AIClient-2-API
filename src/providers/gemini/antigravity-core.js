@@ -55,13 +55,14 @@ const DEFAULT_THINKING_MIN = 1024;
 const DEFAULT_THINKING_MAX = 100000;
 
 // 获取 Antigravity 模型列表
-const ANTIGRAVITY_MODELS = getProviderModels('gemini-antigravity');
+const ANTIGRAVITY_MODELS = getProviderModels(MODEL_PROVIDER.ANTIGRAVITY);
 
 // 模型别名映射 - 别名 -> 真实模型名
 const MODEL_ALIAS_MAP = {
     'gemini-2.5-computer-use-preview-10-2025': 'rev19-uic3-1p',
     'gemini-3-pro-image-preview': 'gemini-3-pro-image',
     'gemini-3-pro-preview': 'gemini-3-pro-high',
+    'gemini-3.1-pro-preview': 'gemini-3.1-pro-high',
     'gemini-3-flash-preview': 'gemini-3-flash',
     'gemini-2.5-flash-preview': 'gemini-2.5-flash',
     'gemini-claude-sonnet-4-5': 'claude-sonnet-4-5',
@@ -75,6 +76,7 @@ const MODEL_NAME_MAP = {
     'rev19-uic3-1p': 'gemini-2.5-computer-use-preview-10-2025',
     'gemini-3-pro-image': 'gemini-3-pro-image-preview',
     'gemini-3-pro-high': 'gemini-3-pro-preview',
+    'gemini-3.1-pro-high': 'gemini-3.1-pro-preview',
     'gemini-3-flash': 'gemini-3-flash-preview',
     'gemini-2.5-flash': 'gemini-2.5-flash-preview',
     'claude-sonnet-4-5': 'gemini-claude-sonnet-4-5',
@@ -1107,7 +1109,7 @@ export class AntigravityApiService {
             // 检查是否为可重试的网络错误
             const isNetworkError = isRetryableNetworkError(error);
             
-            logger.error(`[Antigravity API] Error calling ${method} on ${baseURL}:`, status, error.message);
+            logger.error(`[Antigravity API] Error calling (Status: ${status}, Code: ${errorCode}):`, error.message);
 
             if ((status === 400 || status === 401) && !isRetry) {
                 logger.info('[Antigravity API] Received 401/400. Triggering background refresh via PoolManager...');
@@ -1209,7 +1211,7 @@ export class AntigravityApiService {
             // 检查是否为可重试的网络错误
             const isNetworkError = isRetryableNetworkError(error);
             
-            logger.error(`[Antigravity API] Error during stream ${method} on ${baseURL}:`, status, error.message);
+            logger.error(`[Antigravity API] Error during stream (Status: ${status}, Code: ${errorCode}):`, error.message);
 
             if ((status === 400 || status === 401) && !isRetry) {
                 logger.info('[Antigravity API] Received 401/400 during stream. Triggering background refresh via PoolManager...');

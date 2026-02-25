@@ -14,12 +14,14 @@ import { isRetryableNetworkError, MODEL_PROVIDER, formatExpiryLog } from '../../
 import { getProviderPoolManager } from '../../services/service-manager.js';
 
 const KIRO_THINKING = {
+    MIN_BUDGET_TOKENS: 1024,
     MAX_BUDGET_TOKENS: 24576,
     DEFAULT_BUDGET_TOKENS: 20000,
     START_TAG: '<thinking>',
     END_TAG: '</thinking>',
     MODE_TAG: '<thinking_mode>',
     MAX_LEN_TAG: '<max_thinking_length>',
+    EFFORT_TAG: '<thinking_effort>',
 };
 
 const KIRO_CONSTANTS = {
@@ -40,12 +42,13 @@ const KIRO_CONSTANTS = {
 };
 
 // 从 provider-models.js 获取支持的模型列表
-const KIRO_MODELS = getProviderModels('claude-kiro-oauth');
+const KIRO_MODELS = getProviderModels(MODEL_PROVIDER.KIRO_API);
 
 // 完整的模型映射表
 const FULL_MODEL_MAPPING = {
     "claude-haiku-4-5":"claude-haiku-4.5",
     "claude-opus-4-6":"claude-opus-4.6",
+    "claude-sonnet-4-6":"claude-sonnet-4.6",
     "claude-opus-4-5":"claude-opus-4.5",
     "claude-opus-4-5-20251101":"claude-opus-4.5",
     "claude-sonnet-4-5": "CLAUDE_SONNET_4_5_20250929_V1_0",
@@ -116,6 +119,42 @@ function findRealTag(text, tag, startIndex = 0) {
             return pos;
         }
         
+        searchStart = pos + 1;
+    }
+}
+
+function isWhitespaceOnly(text) {
+    if (text === null || text === undefined) return true;
+    return String(text).trim().length === 0;
+}
+
+/**
+ * Find a "real" thinking end tag that is not quoted/backticked and is followed by '\n\n'.
+ * This avoids prematurely closing a thinking block when the model mentions `</thinking>`
+ * inside the thinking content.
+ */
+function findRealThinkingEndTag(buffer, startIndex = 0) {
+    let searchStart = Math.max(0, startIndex);
+    while (true) {
+        const pos = findRealTag(buffer, KIRO_THINKING.END_TAG, searchStart);
+        if (pos === -1) return -1;
+        const after = buffer.slice(pos + KIRO_THINKING.END_TAG.length);
+        if (after.startsWith('\n\n')) return pos;
+        searchStart = pos + 1;
+    }
+}
+
+/**
+ * Find a "real" thinking end tag only when it is at the buffer end (after it is whitespace only).
+ * This is used for boundary-event scenarios (tool_use starts immediately after thinking, or stream end).
+ */
+function findRealThinkingEndTagAtBufferEnd(buffer, startIndex = 0) {
+    let searchStart = Math.max(0, startIndex);
+    while (true) {
+        const pos = findRealTag(buffer, KIRO_THINKING.END_TAG, searchStart);
+        if (pos === -1) return -1;
+        const after = buffer.slice(pos + KIRO_THINKING.END_TAG.length);
+        if (isWhitespaceOnly(after)) return pos;
         searchStart = pos + 1;
     }
 }
@@ -742,18 +781,32 @@ async saveCredentialsToFile(filePath, newData) {
             value = KIRO_THINKING.DEFAULT_BUDGET_TOKENS;
         }
         value = Math.floor(value);
+        if (value < KIRO_THINKING.MIN_BUDGET_TOKENS) value = KIRO_THINKING.MIN_BUDGET_TOKENS;
         return Math.min(value, KIRO_THINKING.MAX_BUDGET_TOKENS);
     }
 
     _generateThinkingPrefix(thinking) {
-        if (!thinking || thinking.type !== 'enabled') return null;
-        const budget = this._normalizeThinkingBudgetTokens(thinking.budget_tokens);
-        return `<thinking_mode>enabled</thinking_mode><max_thinking_length>${budget}</max_thinking_length>`;
+        if (!thinking || typeof thinking !== 'object') return null;
+        const type = String(thinking.type || '').toLowerCase().trim();
+
+        if (type === 'enabled') {
+            const budget = this._normalizeThinkingBudgetTokens(thinking.budget_tokens);
+            return `<thinking_mode>enabled</thinking_mode><max_thinking_length>${budget}</max_thinking_length>`;
+        }
+
+        if (type === 'adaptive') {
+            const effortRaw = typeof thinking.effort === 'string' ? thinking.effort : '';
+            const effort = effortRaw.toLowerCase().trim();
+            const normalizedEffort = (effort === 'low' || effort === 'medium' || effort === 'high') ? effort : 'high';
+            return `<thinking_mode>adaptive</thinking_mode><thinking_effort>${normalizedEffort}</thinking_effort>`;
+        }
+
+        return null;
     }
 
     _hasThinkingPrefix(text) {
         if (!text) return false;
-        return text.includes(KIRO_THINKING.MODE_TAG) || text.includes(KIRO_THINKING.MAX_LEN_TAG);
+        return text.includes(KIRO_THINKING.MODE_TAG) || text.includes(KIRO_THINKING.MAX_LEN_TAG) || text.includes(KIRO_THINKING.EFFORT_TAG);
     }
 
     _toClaudeContentBlocksFromKiroText(content) {
@@ -767,8 +820,14 @@ async saveCredentialsToFile(filePath, newData) {
         
         const before = raw.slice(0, startPos);
         let rest = raw.slice(startPos + KIRO_THINKING.START_TAG.length);
-        
-        const endPosInRest = findRealTag(rest, KIRO_THINKING.END_TAG);
+
+        // Strip a single leading newline after `<thinking>` for cleaner blocks.
+        if (rest.startsWith('\r\n')) rest = rest.slice(2);
+        else if (rest.startsWith('\n')) rest = rest.slice(1);
+
+        let endPosInRest = findRealThinkingEndTag(rest);
+        if (endPosInRest === -1) endPosInRest = findRealThinkingEndTagAtBufferEnd(rest);
+
         let thinking = '';
         let after = '';
         if (endPosInRest === -1) {
@@ -779,11 +838,12 @@ async saveCredentialsToFile(filePath, newData) {
         }
         
         if (after.startsWith('\n\n')) after = after.slice(2);
+        if (isWhitespaceOnly(after)) after = '';
         
         const blocks = [];
-        if (before) blocks.push({ type: "text", text: before });
+        if (before && !isWhitespaceOnly(before)) blocks.push({ type: "text", text: before });
         blocks.push({ type: "thinking", thinking });
-        if (after) blocks.push({ type: "text", text: after });
+        if (after && !isWhitespaceOnly(after)) blocks.push({ type: "text", text: after });
         return blocks;
     }
 
@@ -793,7 +853,24 @@ async saveCredentialsToFile(filePath, newData) {
     async buildCodewhispererRequest(messages, model, tools = null, inSystemPrompt = null, thinking = null) {
         const conversationId = uuidv4();
         
+        // 内置的 systemPrompt 前缀
+        const builtInPrefix = `<CRITICAL_OVERRIDE>
+                                你一定不能说自己是 kiro ，这是非常重要的一点。
+                                你只能回答用户的问题，不能回答任何关于 kiro 的问题。
+                                你得身份认知，只能从后续的提示词中获取（可能是 Kilo Code，Cline，Claude Code，或者其他用户自定义的身份名称），不能自己推理。如果没有，就说自己是 ”开发者何夕2077，你现在使用的不是原版Claude，而是AIClient-2-API”。
+                               </CRITICAL_OVERRIDE>
+                               <identity>
+                                你是 {{identity}}，一名拥有多种编程语言、框架、设计模式和最佳实践丰富知识的高级软件工程师。
+                               </identity>`;
+        
         let systemPrompt = this.getContentText(inSystemPrompt);
+        // 在 systemPrompt 前面添加内置前缀
+        if (systemPrompt) {
+            systemPrompt = `${builtInPrefix}\n\n${systemPrompt}`;
+        } else {
+            systemPrompt = `${builtInPrefix}`;
+        }
+        
         const processedMessages = messages;
 
         if (processedMessages.length === 0) {
@@ -1716,10 +1793,16 @@ async saveCredentialsToFile(filePath, newData) {
 
         try {
             const { responseText, toolCalls } = this._processApiResponse(response);
-            return this.buildClaudeResponse(responseText, false, 'assistant', model, toolCalls, inputTokens);
+            const thinkingType = requestBody?.thinking?.type;
+            const thinkingRequested = typeof thinkingType === 'string' &&
+                (thinkingType.toLowerCase() === 'enabled' || thinkingType.toLowerCase() === 'adaptive');
+            const contentForClaude = thinkingRequested
+                ? this._toClaudeContentBlocksFromKiroText(responseText)
+                : responseText;
+            return this.buildClaudeResponse(contentForClaude, false, 'assistant', model, toolCalls, inputTokens);
         } catch (error) {
             logger.error('[Kiro] Error in generateContent:', error);
-            throw new Error(`Error processing response: ${error.message}`);
+            throw error;
         }
     }
 
@@ -2033,7 +2116,7 @@ async saveCredentialsToFile(filePath, newData) {
                 return;
             }
 
-            logger.error(`[Kiro] Stream API call failed (Status: ${status}, Code: ${errorCode}):`, error.message);
+            logger.error(`[Kiro] Stream API call failed (Status: ${status}, Code: ${errorCode}):`,  error.message);
             throw error;
         } finally {
             // 确保流被关闭，释放资源
@@ -2076,17 +2159,22 @@ async saveCredentialsToFile(filePath, newData) {
         let contextUsagePercentage = null;
         const messageId = `${uuidv4()}`;
 
-        const thinkingRequested = requestBody?.thinking?.type === 'enabled';
+        const thinkingType = requestBody?.thinking?.type;
+        const thinkingRequested = typeof thinkingType === 'string' &&
+            (thinkingType.toLowerCase() === 'enabled' || thinkingType.toLowerCase() === 'adaptive');
 
         const streamState = {
             thinkingRequested,
             buffer: '',
+            pendingTextBeforeThinking: '',
             inThinking: false,
             thinkingExtracted: false,
             thinkingBlockIndex: null,
             textBlockIndex: null,
             nextBlockIndex: 0,
             stoppedBlocks: new Set(),
+            stripThinkingLeadingNewline: false,
+            stripTextLeadingNewlinesAfterThinking: false,
         };
 
         const ensureBlockStart = (blockType) => {
@@ -2196,24 +2284,58 @@ async saveCredentialsToFile(filePath, newData) {
                             const startPos = findRealTag(streamState.buffer, KIRO_THINKING.START_TAG);
                             if (startPos !== -1) {
                                 const before = streamState.buffer.slice(0, startPos);
-                                if (before) events.push(...createTextDeltaEvents(before));
+                                const beforeCombined = `${streamState.pendingTextBeforeThinking}${before}`;
+                                // Avoid creating meaningless text blocks before thinking.
+                                if (beforeCombined && !isWhitespaceOnly(beforeCombined)) {
+                                    events.push(...createTextDeltaEvents(beforeCombined));
+                                }
+                                streamState.pendingTextBeforeThinking = '';
 
                                 streamState.buffer = streamState.buffer.slice(startPos + KIRO_THINKING.START_TAG.length);
                                 streamState.inThinking = true;
+                                streamState.stripThinkingLeadingNewline = true;
                                 continue;
                             }
 
                             const safeLen = Math.max(0, streamState.buffer.length - KIRO_THINKING.START_TAG.length);
                             if (safeLen > 0) {
                                 const safeText = streamState.buffer.slice(0, safeLen);
-                                if (safeText) events.push(...createTextDeltaEvents(safeText));
+                                if (safeText) {
+                                    if (isWhitespaceOnly(safeText)) {
+                                        // Buffer whitespace until we know whether a thinking block appears.
+                                        // This prevents a leading text block from being created before thinking.
+                                        const maxKeep = 1024;
+                                        const remaining = maxKeep - streamState.pendingTextBeforeThinking.length;
+                                        if (remaining > 0) {
+                                            streamState.pendingTextBeforeThinking += safeText.slice(0, remaining);
+                                        }
+                                    } else {
+                                        const combined = `${streamState.pendingTextBeforeThinking}${safeText}`;
+                                        streamState.pendingTextBeforeThinking = '';
+                                        events.push(...createTextDeltaEvents(combined));
+                                    }
+                                }
                                 streamState.buffer = streamState.buffer.slice(safeLen);
                             }
                             break;
                         }
 
                         if (streamState.inThinking) {
-                            const endPos = findRealTag(streamState.buffer, KIRO_THINKING.END_TAG);
+                            // Strip a single leading newline after `<thinking>` (may be split across chunks).
+                            if (streamState.stripThinkingLeadingNewline) {
+                                if (streamState.buffer.startsWith('\r\n')) {
+                                    streamState.buffer = streamState.buffer.slice(2);
+                                    streamState.stripThinkingLeadingNewline = false;
+                                } else if (streamState.buffer.startsWith('\n')) {
+                                    streamState.buffer = streamState.buffer.slice(1);
+                                    streamState.stripThinkingLeadingNewline = false;
+                                } else if (streamState.buffer.length > 0) {
+                                    streamState.stripThinkingLeadingNewline = false;
+                                }
+                            }
+
+                            let endPos = findRealThinkingEndTag(streamState.buffer);
+                            if (endPos === -1) endPos = findRealThinkingEndTagAtBufferEnd(streamState.buffer);
                             if (endPos !== -1) {
                                 const thinkingPart = streamState.buffer.slice(0, endPos);
                                 if (thinkingPart) events.push(...createThinkingDeltaEvents(thinkingPart));
@@ -2221,13 +2343,13 @@ async saveCredentialsToFile(filePath, newData) {
                                 streamState.buffer = streamState.buffer.slice(endPos + KIRO_THINKING.END_TAG.length);
                                 streamState.inThinking = false;
                                 streamState.thinkingExtracted = true;
+                                streamState.stripThinkingLeadingNewline = false;
 
                                 events.push(...createThinkingDeltaEvents(""));
                                 events.push(...stopBlock(streamState.thinkingBlockIndex));
 
-                                if (streamState.buffer.startsWith('\n\n')) {
-                                    streamState.buffer = streamState.buffer.slice(2);
-                                }
+                                // Strip '\n\n' after the end tag once we switch back to text (may arrive in next chunk).
+                                streamState.stripTextLeadingNewlinesAfterThinking = true;
                                 continue;
                             }
 
@@ -2241,8 +2363,13 @@ async saveCredentialsToFile(filePath, newData) {
                         }
 
                         if (streamState.thinkingExtracted) {
-                            const rest = streamState.buffer;
+                            let rest = streamState.buffer;
                             streamState.buffer = '';
+                            if (streamState.stripTextLeadingNewlinesAfterThinking) {
+                                if (rest.startsWith('\r\n\r\n')) rest = rest.slice(4);
+                                else if (rest.startsWith('\n\n')) rest = rest.slice(2);
+                                streamState.stripTextLeadingNewlinesAfterThinking = false;
+                            }
                             if (rest) events.push(...createTextDeltaEvents(rest));
                             break;
                         }
@@ -2323,18 +2450,33 @@ async saveCredentialsToFile(filePath, newData) {
                 currentToolCall = null;
             }
 
-            if (thinkingRequested && streamState.buffer) {
+            if (thinkingRequested && (streamState.inThinking || streamState.buffer || streamState.pendingTextBeforeThinking)) {
                 if (streamState.inThinking) {
                     logger.warn('[Kiro] Incomplete thinking tag at stream end');
+                    // Strip a single leading newline after `<thinking>` if we haven't yet.
+                    if (streamState.stripThinkingLeadingNewline) {
+                        if (streamState.buffer.startsWith('\r\n')) streamState.buffer = streamState.buffer.slice(2);
+                        else if (streamState.buffer.startsWith('\n')) streamState.buffer = streamState.buffer.slice(1);
+                        streamState.stripThinkingLeadingNewline = false;
+                    }
                     yield* pushEvents(createThinkingDeltaEvents(streamState.buffer));
                     streamState.buffer = '';
                     yield* pushEvents(createThinkingDeltaEvents(""));
                     yield* pushEvents(stopBlock(streamState.thinkingBlockIndex));
                 } else if (!streamState.thinkingExtracted) {
-                    yield* pushEvents(createTextDeltaEvents(streamState.buffer));
+                    const remaining = `${streamState.pendingTextBeforeThinking}${streamState.buffer}`;
+                    streamState.pendingTextBeforeThinking = '';
+                    if (remaining) yield* pushEvents(createTextDeltaEvents(remaining));
                     streamState.buffer = '';
                 } else {
-                    yield* pushEvents(createTextDeltaEvents(streamState.buffer));
+                    let remaining = streamState.buffer;
+                    streamState.buffer = '';
+                    if (streamState.stripTextLeadingNewlinesAfterThinking) {
+                        if (remaining.startsWith('\r\n\r\n')) remaining = remaining.slice(4);
+                        else if (remaining.startsWith('\n\n')) remaining = remaining.slice(2);
+                        streamState.stripTextLeadingNewlinesAfterThinking = false;
+                    }
+                    if (remaining) yield* pushEvents(createTextDeltaEvents(remaining));
                     streamState.buffer = '';
                 }
             }
@@ -2427,7 +2569,7 @@ async saveCredentialsToFile(filePath, newData) {
 
         } catch (error) {
             logger.error('[Kiro] Error in streaming generation:', error);
-            throw new Error(`Error processing response: ${error.message}`);
+            throw error;
         }
     }
 
@@ -2457,9 +2599,17 @@ async saveCredentialsToFile(filePath, newData) {
         }
         
         // Count thinking prefix tokens if thinking is enabled
-        if (requestBody.thinking?.type === 'enabled') {
-            const budget = this._normalizeThinkingBudgetTokens(requestBody.thinking.budget_tokens);
-            allText += `<thinking_mode>enabled</thinking_mode><max_thinking_length>${budget}</max_thinking_length>`;
+        if (requestBody.thinking?.type && typeof requestBody.thinking.type === 'string') {
+            const t = requestBody.thinking.type.toLowerCase().trim();
+            if (t === 'enabled') {
+                const budget = this._normalizeThinkingBudgetTokens(requestBody.thinking.budget_tokens);
+                allText += `<thinking_mode>enabled</thinking_mode><max_thinking_length>${budget}</max_thinking_length>`;
+            } else if (t === 'adaptive') {
+                const effortRaw = typeof requestBody.thinking.effort === 'string' ? requestBody.thinking.effort : '';
+                const effort = effortRaw.toLowerCase().trim();
+                const normalizedEffort = (effort === 'low' || effort === 'medium' || effort === 'high') ? effort : 'high';
+                allText += `<thinking_mode>adaptive</thinking_mode><thinking_effort>${normalizedEffort}</thinking_effort>`;
+            }
         }
         
         // Count all messages tokens
@@ -2609,9 +2759,31 @@ async saveCredentialsToFile(filePath, newData) {
         } else {
             // Non-streaming response (full message object)
             const contentArray = [];
-            let stopReason = "end_turn";
             let outputTokens = 0;
 
+            // 1) Content blocks (text/thinking) first.
+            if (Array.isArray(content)) {
+                for (const block of content) {
+                    if (!block || typeof block !== 'object') continue;
+                    if (block.type === 'text' && typeof block.text === 'string') {
+                        contentArray.push({ type: 'text', text: block.text });
+                        outputTokens += this.countTextTokens(block.text);
+                    } else if (block.type === 'thinking' && typeof block.thinking === 'string') {
+                        contentArray.push({ type: 'thinking', thinking: block.thinking });
+                        outputTokens += this.countTextTokens(block.thinking);
+                    } else if (typeof block.text === 'string' && block.text) {
+                        // Best-effort fallback for unknown blocks carrying plain text.
+                        contentArray.push({ type: 'text', text: block.text });
+                        outputTokens += this.countTextTokens(block.text);
+                    }
+                }
+            } else if (content) {
+                contentArray.push({ type: "text", text: content });
+                outputTokens += this.countTextTokens(content);
+            }
+
+            // 2) Append tool_use blocks (if any).
+            let stopReason = "end_turn";
             if (toolCalls && toolCalls.length > 0) {
                 for (const tc of toolCalls) {
                     let inputObject;
@@ -2876,4 +3048,3 @@ async saveCredentialsToFile(filePath, newData) {
         }
     }
 }
-
