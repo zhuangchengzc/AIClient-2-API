@@ -15,7 +15,7 @@ NC='\033[0m' # No Color
 # 项目配置
 APP_NAME="aiclient-2-api"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ECOSYSTEM_FILE="$PROJECT_ROOT/ecosystem.config.js"
+ECOSYSTEM_FILE="$PROJECT_ROOT/ecosystem.config.cjs"
 
 cd "$PROJECT_ROOT"
 
