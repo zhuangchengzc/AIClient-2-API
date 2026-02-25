@@ -134,7 +134,9 @@ function generateResponsePage(isSuccess, message) {
  * @returns {Object} 包含 authUrl 和 redirectUri
  */
 function generateIFlowAuthorizationURL(state, port) {
-    const redirectUri = `http://localhost:${port}/oauth2callback`;
+    // 支持通过环境变量配置外部主机
+    const externalHost = process.env.OAUTH_HOST || 'localhost';
+    const redirectUri = `http://${externalHost}:${port}/oauth2callback`;
     const params = new URLSearchParams({
         loginMethod: 'phone',
         type: 'phone',

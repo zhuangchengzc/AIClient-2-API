@@ -17,7 +17,11 @@ const CODEX_OAUTH_CONFIG = {
     clientId: 'app_EMoamEEZ73f0CkXaXp7hrann',
     authUrl: 'https://auth.openai.com/oauth/authorize',
     tokenUrl: 'https://auth.openai.com/oauth/token',
-    redirectUri: 'http://localhost:1455/auth/callback',
+    // 支持通过环境变量配置外部主机
+    get redirectUri() {
+        const host = process.env.OAUTH_HOST || 'localhost';
+        return `http://${host}:${this.port}/auth/callback`;
+    },
     port: 1455,
     scopes: 'openid email profile offline_access',
     logPrefix: '[Codex Auth]'

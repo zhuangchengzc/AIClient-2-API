@@ -211,8 +211,9 @@ async function handleKiroSocialAuth(provider, currentConfig, options = {}) {
         handlerPort = await startKiroCallbackServer(codeVerifier, state, options);
     }
     
-    // 使用 HTTP localhost 作为 redirect_uri
-    const redirectUri = `http://127.0.0.1:${handlerPort}/oauth/callback`;
+    // 使用 HTTP 作为 redirect_uri，支持外部主机配置
+    const externalHost = process.env.OAUTH_HOST || '127.0.0.1';
+    const redirectUri = `http://${externalHost}:${handlerPort}/oauth/callback`;
     
     // 构建授权 URL
     const authUrl = `${KIRO_OAUTH_CONFIG.authServiceEndpoint}/login?` +

@@ -1,0 +1,40 @@
+[Unit]
+Description=AIClient-2-API Service
+Documentation=https://github.com/your-repo/aiclient-2-api
+After=network.target
+
+[Service]
+Type=simple
+User=aiclient
+Group=aiclient
+WorkingDirectory=/opt/aiclient-2-api
+ExecStart=/usr/bin/node src/core/master.js
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aiclient-2-api
+
+# 环境变量配置
+Environment=NODE_ENV=production
+Environment=PORT=3000
+Environment=OAUTH_HOST=your-public-ip-or-domain
+Environment=LOG_LEVEL=info
+Environment=MASTER_PORT=3100
+
+# 从文件加载环境变量
+EnvironmentFile=-/opt/aiclient-2-api/.env
+
+# 安全配置
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/aiclient-2-api
+
+# 资源限制
+LimitNOFILE=65536
+LimitNPROC=32768
+
+[Install]
+WantedBy=multi-user.target

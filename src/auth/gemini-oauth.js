@@ -203,9 +203,10 @@ async function createOAuthCallbackServer(config, redirectUri, authClient, credPa
             }
         });
         
-        const host = '0.0.0.0';
+        const host = '0.0.0.0'; // 绑定所有网络接口
         server.listen(port, host, () => {
             logger.info(`${config.logPrefix} OAuth 回调服务器已启动于 ${host}:${port}`);
+            logger.info(`${config.logPrefix} 外部访问地址: ${redirectUri}`);
             activeServers.set(provider, { server, port });
             resolve(server);
         });
@@ -226,8 +227,12 @@ async function handleGoogleOAuth(providerKey, currentConfig, options = {}) {
     }
     
     const port = parseInt(options.port) || config.port;
-    const host = 'localhost';
-    const redirectUri = `http://${host}:${port}`;
+    // 支持通过环境变量或配置文件设置外部访问的主机名/IP
+    const externalHost = process.env.OAUTH_HOST || 
+                        currentConfig?.OAUTH_HOST || 
+                        options.host || 
+                        'localhost';
+    const redirectUri = `http://${externalHost}:${port}`;
 
     // 获取代理配置
     const proxyConfig = getGoogleAuthProxyConfig(currentConfig, providerKey);
